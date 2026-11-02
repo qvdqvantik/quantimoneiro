@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 
 import utils
 
-
+# ---------- настройки ----------
 HIDDEN = 64
 EPOCHS = 10
 BATCH_SIZE = 64
 LEARNING_RATE = 0.5
 SEED = 42
-
+# --------------------------------
 
 rng = np.random.default_rng(SEED)
 
@@ -21,7 +21,7 @@ def sigmoid(x):
 
 
 def softmax(x):
-    x = x - x.max(axis=1, keepdims=True)  
+    x = x - x.max(axis=1, keepdims=True)  # для численной устойчивости
     e = np.exp(x)
     return e / e.sum(axis=1, keepdims=True)
 
@@ -44,6 +44,7 @@ def evaluate(x, y, params):
 def main():
     x_train, y_train, x_test, y_test = utils.load_dataset()
 
+    # Инициализация Xavier: ширина разброса зависит от размеров слоя
     w1 = rng.uniform(-1, 1, (784, HIDDEN)) * np.sqrt(6 / (784 + HIDDEN))
     b1 = np.zeros(HIDDEN)
     w2 = rng.uniform(-1, 1, (HIDDEN, 10)) * np.sqrt(6 / (HIDDEN + 10))
@@ -59,6 +60,7 @@ def main():
 
             hidden, probs = forward(x, params)
 
+            # градиенты считаем ДО обновления весов
             delta_out = (probs - y) / len(x)
             delta_hidden = (delta_out @ params[2].T) * hidden * (1 - hidden)
 
@@ -69,8 +71,10 @@ def main():
 
         tr_loss, tr_acc = evaluate(x_train, y_train, params)
         te_loss, te_acc = evaluate(x_test, y_test, params)
-        print(f"Epoch {epoch:2d} | train loss {tr_loss:.4f} acc {tr_acc:.2f}% " f"| test loss {te_loss:.4f} acc {te_acc:.2f}%")
+        print(f"Epoch {epoch:2d} | train loss {tr_loss:.4f} acc {tr_acc:.2f}% "
+              f"| test loss {te_loss:.4f} acc {te_acc:.2f}%")
 
+    # ---------- своя картинка ----------
     if os.path.exists("custom.jpg"):
         custom = utils.load_custom_image("custom.jpg")
         _, probs = forward(custom.reshape(1, -1), params)
