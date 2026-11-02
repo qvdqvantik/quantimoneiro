@@ -1,3 +1,10 @@
+"""
+    python charlm.py                 - обучение (тексты берутся из папки texts/*.txt), модель сохраняется как quantum_01.ГГГГ.ММ.ДД.npz, потом чат
+    python charlm.py chat            - чат с самой свежей моделью
+    python charlm.py chat ФАЙЛ.npz   - чат с конкретной моделью
+
+В чате пишите просто вопрос. Чтобы продолжить произвольный текст, начните с /raw
+"""
 import glob
 import os
 import sys
@@ -16,14 +23,13 @@ STEPS = 20000
 LR = 0.003          
 TEMPERATURE = 0.8   
 GEN_LEN = 300
+ANSWER_LEN = 400    # максимальная длина ответа в чате
+ANSWER_TEMPERATURE = 0.3  # для ответов лучше низкая: меньше выдумывания (0.2-0.5)
+KEEP_BEST = False   # True: сохранять версию с лучшим val loss (и рано останавливаться), False: обучать все STEPS и сохранить последнюю
+EVAL_EVERY = 500    # как часто считать val loss
+PATIENCE = 5        # при KEEP_BEST=True: остановиться, если val loss не улучшался столько проверок подряд
 SEED = 42
 # --------------------------------
-
-"""
-    python charlm.py                 - обучение (тексты берутся из папки texts/*.txt), модель сохраняется как quantum_01.ГГГГ.ММ.ДД.npz, потом чат
-    python charlm.py chat            - чат с самой свежей моделью
-    python charlm.py chat ФАЙЛ.npz   - чат с конкретной моделью
-"""
 
 rng = np.random.default_rng(SEED)
 
@@ -92,7 +98,7 @@ def get_batch(ids, size, pad, augment=True):
     return x, y
 
 
-def generate(p, chars, prompt, length=GEN_LEN, temperature=TEMPERATURE):
+def generate(p, chars, prompt, length=GEN_LEN, temperature=TEMPERATURE, stop=()):
     stoi = {c: i for i, c in enumerate(chars)}
     pad = len(chars)
     ctx = [pad] * CONTEXT + [stoi[c] for c in prompt if c in stoi]
@@ -105,7 +111,19 @@ def generate(p, chars, prompt, length=GEN_LEN, temperature=TEMPERATURE):
         nxt = int(rng.choice(len(q), p=q))
         out.append(chars[nxt])
         ctx = ctx[1:] + [nxt]
+        text = "".join(out)
+        hit = next((st for st in stop if text.endswith(st)), None)
+        if hit:  # дошли до стоп-строки: ответ закончился
+            return prompt + text[:-len(hit)]
     return prompt + "".join(out)
+
+
+def answer(p, chars, question):
+    """Оформляет вопрос как в обучающем тексте и останавливается в конце ответа."""
+    prompt = f"Вопрос: {question.strip()}\nОтвет:"
+    full = generate(p, chars, prompt, length=ANSWER_LEN, temperature=ANSWER_TEMPERATURE,
+                    stop=("\n\n", "\nВопрос:"))
+    return full[len(prompt):].strip()
 
 
 def new_model_path():
@@ -139,12 +157,15 @@ def load(path=None):
 
 
 def chat(p, chars):
-    print("\nВведите начало текста').")
+    print("\nЗадайте вопрос. Начните с /raw, чтобы продолжить произвольный текст. Пустая строка - выход.")
     while True:
-        prompt = input("> ").replace("\\n", "\n")
-        if not prompt:
+        q = input("> ").strip()
+        if not q:
             break
-        print(generate(p, chars, prompt), "\n")
+        if q.startswith("/raw"):
+            print(generate(p, chars, q[4:].lstrip().replace("\\n", "\n")), "\n")
+        else:
+            print("Ответ:", answer(p, chars, q), "\n")
 
 
 def train():
@@ -163,11 +184,20 @@ def train():
     split = int(len(ids) * 0.9) if len(ids) > 5000 else len(ids)
     train_ids, val_ids = ids[:split], (ids[split:] if split < len(ids) else None)
 
+    # фиксированная отложенная выборка - чтобы val loss сравнивался честно
+    vx = vy = None
+    if val_ids is not None and len(val_ids) > CONTEXT + 1:
+        n_val = min(4096, len(val_ids) - CONTEXT - 1)
+        starts = np.linspace(0, len(val_ids) - CONTEXT - 2, n_val).astype(int)
+        vx = np.stack([val_ids[s0:s0 + CONTEXT] for s0 in starts])
+        vy = val_ids[starts + CONTEXT]
+
     p = init_params(len(chars))
     m = {k: np.zeros_like(v) for k, v in p.items()}
     v = {k: np.zeros_like(x) for k, x in p.items()}
     b1, b2, eps = 0.9, 0.999, 1e-8
 
+    best_loss, best_step, best_p, bad = float("inf"), 0, None, 0
     run = 0.0
     for step in range(1, STEPS + 1):
         x, y = get_batch(train_ids, BATCH, pad)
@@ -180,16 +210,29 @@ def train():
             v[k] = b2 * v[k] + (1 - b2) * g[k] ** 2
             p[k] -= LR * (m[k] / (1 - b1 ** step)) / (np.sqrt(v[k] / (1 - b2 ** step)) + eps)
 
-        if step % 500 == 0 or step == 1:
+        if step % EVAL_EVERY == 0 or step == 1:
             msg = f"шаг {step:5d} | train loss {run:.3f}"
-            if val_ids is not None and len(val_ids) > CONTEXT + 1:
-                vx, vy = get_batch(val_ids, 512, pad, augment=False)
-                msg += f" | val loss {loss_fn(forward(vx, p)[2], vy):.3f}"
+            if vx is not None:
+                val = loss_fn(forward(vx, p)[2], vy)
+                msg += f" | val loss {val:.3f}"
+                if val < best_loss:
+                    best_loss, best_step, bad = val, step, 0
+                    best_p = {k: a.copy() for k, a in p.items()}
+                    msg += "  <- лучшая"
+                elif step > 1:
+                    bad += 1
             print(msg)
-        if step % 2000 == 0 or step == STEPS:
+            if vx is not None and KEEP_BEST and bad >= PATIENCE:
+                print(f"val loss не улучшается {PATIENCE} проверок подряд, останавливаю обучение.")
+                break
+        if step % 2000 == 0:
             print("--- пример ---")
-            print(generate(p, chars, "Вопрос:", 150))
+            print("Вопрос: Как тебя зовут?\nОтвет:", answer(p, chars, "Как тебя зовут?"))
             print("--------------")
+
+    if KEEP_BEST and best_p is not None:
+        p = best_p
+        print(f"Сохраняю лучшую версию: шаг {best_step}, val loss {best_loss:.3f}")
 
     path = save(p, chars)
     print(f"Модель сохранена в {path}")
