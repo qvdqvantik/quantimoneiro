@@ -1,63 +1,86 @@
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 
 import utils
 
-images, labels = utils.load_dataset()
 
-weights_input_to_hidden = np.random.uniform(-0.5, 0.5, (20, 784))
-weights_hidden_to_output = np.random.uniform(-0.5, 0.5, (10, 20))
-bias_input_to_hidden = np.zeros((20, 1))
-bias_hidden_to_output = np.zeros((10, 1))
+HIDDEN = 64
+EPOCHS = 10
+BATCH_SIZE = 64
+LEARNING_RATE = 0.5
+SEED = 42
 
-epochs = 10
-e_loss = 0
-e_correct = 0
-learning_rate = 0.01
 
-for epoch in range(epochs):
-	print(f"Epoch №{epoch}")
+rng = np.random.default_rng(SEED)
 
-	for image, label in zip(images, labels):
-		image = np.reshape(image, (-1, 1))
-		label = np.reshape(label, (-1, 1))
 
-		hidden_raw = bias_input_to_hidden + weights_input_to_hidden @ image
-		hidden = 1 / (1 + np.exp(-hidden_raw)) # sigmo
-		
-		output_raw = bias_hidden_to_output + weights_hidden_to_output @ hidden
-		output = 1 / (1 + np.exp(-output_raw))
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
-		
-		e_loss += 1 / len(output) * np.sum((output - label) ** 2, axis=0)
-		e_correct += int(np.argmax(output) == np.argmax(label))
 
-		
-		delta_output = output - label
-		weights_hidden_to_output += -learning_rate * delta_output @ np.transpose(hidden)
-		bias_hidden_to_output += -learning_rate * delta_output
+def softmax(x):
+    x = x - x.max(axis=1, keepdims=True)  
+    e = np.exp(x)
+    return e / e.sum(axis=1, keepdims=True)
 
-		
-		delta_hidden = np.transpose(weights_hidden_to_output) @ delta_output * (hidden * (1 - hidden))
-		weights_input_to_hidden += -learning_rate * delta_hidden @ np.transpose(image)
-		bias_input_to_hidden += -learning_rate * delta_hidden
 
-	print(f"Loss: {round((e_loss[0] / images.shape[0]) * 100, 3)}%")
-	print(f"Accuracy: {round((e_correct / images.shape[0]) * 100, 3)}%")
-	e_loss = 0
-	e_correct = 0
+def forward(x, params):
+    w1, b1, w2, b2 = params
+    hidden = sigmoid(x @ w1 + b1)
+    probs = softmax(hidden @ w2 + b2)
+    return hidden, probs
 
-test_image = plt.imread("custom.jpg", format="jpeg")
-gray = lambda rgb : np.dot(rgb[... , :9] , [0.299 , 0.587, 0.114]) 
-test_image = 1 - (gray(test_image).astype("float32") / 255)
-test_image = np.reshape(test_image, (test_image.shape[0] * test_image.shape[1]))
-image = np.reshape(test_image, (-1, 1))
-hidden_raw = bias_input_to_hidden + weights_input_to_hidden @ image
-hidden = 1 / (1 + np.exp(-hidden_raw)) # sigmo
 
-output_raw = bias_hidden_to_output + weights_hidden_to_output @ hidden
-output = 1 / (1 + np.exp(-output_raw))
+def evaluate(x, y, params):
+    """Возвращает (cross-entropy loss, accuracy в %)."""
+    _, probs = forward(x, params)
+    loss = -np.mean(np.sum(y * np.log(probs + 1e-9), axis=1))
+    acc = np.mean(probs.argmax(axis=1) == y.argmax(axis=1)) * 100
+    return loss, acc
 
-plt.imshow(test_image.reshape(28, 28), cmap="Greys")
-plt.title(f"NN suggests the CUSTOM number is: {output.argmax()}")
-plt.show()
+
+def main():
+    x_train, y_train, x_test, y_test = utils.load_dataset()
+
+    w1 = rng.uniform(-1, 1, (784, HIDDEN)) * np.sqrt(6 / (784 + HIDDEN))
+    b1 = np.zeros(HIDDEN)
+    w2 = rng.uniform(-1, 1, (HIDDEN, 10)) * np.sqrt(6 / (HIDDEN + 10))
+    b2 = np.zeros(10)
+    params = [w1, b1, w2, b2]
+
+    n = len(x_train)
+    for epoch in range(1, EPOCHS + 1):
+        order = rng.permutation(n)
+        for start in range(0, n, BATCH_SIZE):
+            idx = order[start:start + BATCH_SIZE]
+            x, y = x_train[idx], y_train[idx]
+
+            hidden, probs = forward(x, params)
+
+            delta_out = (probs - y) / len(x)
+            delta_hidden = (delta_out @ params[2].T) * hidden * (1 - hidden)
+
+            params[2] -= LEARNING_RATE * hidden.T @ delta_out
+            params[3] -= LEARNING_RATE * delta_out.sum(axis=0)
+            params[0] -= LEARNING_RATE * x.T @ delta_hidden
+            params[1] -= LEARNING_RATE * delta_hidden.sum(axis=0)
+
+        tr_loss, tr_acc = evaluate(x_train, y_train, params)
+        te_loss, te_acc = evaluate(x_test, y_test, params)
+        print(f"Epoch {epoch:2d} | train loss {tr_loss:.4f} acc {tr_acc:.2f}% " f"| test loss {te_loss:.4f} acc {te_acc:.2f}%")
+
+    if os.path.exists("custom.jpg"):
+        custom = utils.load_custom_image("custom.jpg")
+        _, probs = forward(custom.reshape(1, -1), params)
+        guess = probs.argmax()
+        print(f"Своя цифра: {guess} (уверенность {probs.max() * 100:.1f}%)")
+
+        plt.imshow(custom, cmap="Greys")
+        plt.title(f"NN suggests the CUSTOM number is: {guess}")
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
